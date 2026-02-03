@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Starlane Runner – PixiJS Infinite Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at top, #101020 0, #05050a 50%, #000 100%);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #f5f5f5;
+    }
+
+    #game-container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas {
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
+      background: #02030a;
+    }
+
+    .overlay-branding {
+      position: fixed;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.5);
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .overlay-branding span {
+      color: #4dd0ff;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container"></div>
+  <div class="overlay-branding">
+    Built with <span>PixiJS</span> – Infinite HTML5 Game Demo
+  </div>
+
+  <!-- PixiJS CDN (v7) - SRI removed so it can't break if CDN updates -->
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.4.0/pixi.min.js"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+
+  <script>
+    const GameConfig = {
+      logicalWidth: 480,
+      logicalHeight: 800,
+      backgroundColor: 0x02030a,
+      playerRadius: 20,
+      playerMaxSpeed: 9,
+      playerAcceleration: 1.2,
+      baseAsteroidSpawnInterval: 900,
+      minAsteroidSpawnInterval: 260,
+      asteroidSpeedBase: 3,
+      asteroidSpeedPerSecond: 0.04,
+      asteroidRadiusMin: 14,
+      asteroidRadiusMax: 40,
+      difficultyRampSeconds: 120,
+      invulnerabilityTime: 1000,
+      starfieldScrollSpeed: 0.6,
+      maxDeltaMS: 40
+    };
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function randRange(min, max) {
+      return min + Math.random() * (max - min);
+    }
+
+    const GameState = {
+      Loading: "loading",
+      Menu: "menu",
+      Running: "running",
+      Paused: "paused",
+      GameOver: "game_over"
+    };
+
+    class StateStore {
+      constructor() {
+        this.state = GameState.Loading;
+      }
+      set(state) {
+        this.state = state;
+      }
+      is(state) {
+        return this.state === state;
+      }
+    }
+
+    class InputManager {
+      constructor(view, logicalWidth, logicalHeight) {
+        this.pointerPos = { x: logicalWidth / 2, y: logicalHeight * 0.75 };
+        this.hasPointer = false;
+        this.keys = new Set();
+        this.logicalWidth = logicalWidth;
+        this.logicalHeight = logicalHeight;
+
+        view.addEventListener("pointerdown", this.onPointer.bind(this));
+        view.addEventListener("pointermove", this.onPointer.bind(this));
+        view.addEventListener("pointerup", this.onPointerUp.bind(this));
+        view.addEventListener("pointerleave", this.onPointerUp.bind(this));
+
+        window.addEventListener("keydown", e => this.keys.add(e.code));
+        window.addEventListener("keyup", e => this.keys.delete(e.code));
+      }
+
+      attachApp(app) {
+        this.app = app;
+      }
+
+      onPointer(event) {
+        this.hasPointer = true;
+        const rect = event.target.getBoundingClientRect();
+        const scaleX = this.logicalWidth / rect.width;
+        const scaleY = this.logicalHeight / rect.height;
+
+        const x = (event.clientX - rect.left) * scaleX;
+        const y = (event.clientY - rect.top) * scaleY;
+
+        this.pointerPos.x = clamp(x, 0, this.logicalWidth);
+        this.pointerPos.y = clamp(y, 0, this.logicalHeight);
+      }
+
+      onPointerUp() {
+        this.hasPointer = false;
+      }
+
+      getKeyboardDirection() {
+        let dx = 0, dy = 0;
+        if (this.keys.has("ArrowLeft") || this.keys.has("KeyA")) dx -= 1;
+        if (this.keys.has("ArrowRight") || this.keys.has("KeyD")) dx += 1;
+        if (this.keys.has("ArrowUp") || this.keys.has("KeyW")) dy -= 1;
+        if (this.keys.has("ArrowDown") || this.keys.has("KeyS")) dy += 1;
+        return { dx, dy };
+      }
+    }
+
+    class Player extends PIXI.Container {
+      constructor(config) {
+        super();
+        this.config = config;
+        this.radius = config.playerRadius;
+        this.vx = 0;
+        this.vy = 0;
+
+        this._buildVisual();
+      }
+
+      _buildVisual() {
+        const g = new PIXI.Graphics();
+        g.beginFill(0x24d5ff, 0.15);
+        g.drawCircle(0, 0, this.radius * 2.2);
+        g.endFill();
+
+        g.beginFill(0x24d5ff, 1);
+        g.drawPolygon([
+          0, -this.radius * 1.4,
+          this.radius * 0.9, this.radius * 1.1,
+          0, this.radius * 0.5,
+          -this.radius * 0.9, this.radius * 1.1
+        ]);
+        g.endFill();
+
+        g.beginFill(0xffffff, 0.7);
+        g.drawPolygon([
+          0, -this.radius * 1.0,
+          this.radius * 0.55, this.radius * 0.5,
+          0, this.radius * 0.25,
+          -this.radius * 0.55, this.radius * 0.5
+        ]);
+        g.endFill();
+
+        g.beginFill(0x0b1020, 1);
+        g.drawCircle(0, -this.radius * 0.35, this.radius * 0.45);
+        g.endFill();
+
+        g.cacheAsBitmap = true;
+        this.addChild(g);
+
+        this.thruster = new PIXI.Graphics();
+        this.addChild(this.thruster);
+      }
+
+      update(deltaMS, input) {
+        const dt = Math.min(deltaMS, GameConfig.maxDeltaMS) / 16.67;
+        const keyboard = input.getKeyboardDirection();
+        const hasKeyboardInput = keyboard.dx !== 0 || keyboard.dy !== 0;
+
+        const targetX = input.pointerPos.x;
+        const targetY = input.pointerPos.y;
+
+        if (input.hasPointer) {
+          const dx = targetX - this.x;
+          const dy = targetY - this.y;
+          this.vx = lerp(this.vx, clamp(dx, -this.config.playerMaxSpeed, this.config.playerMaxSpeed), 0.25);
+          this.vy = lerp(this.vy, clamp(dy, -this.config.playerMaxSpeed, this.config.playerMaxSpeed), 0.25);
+        } else if (hasKeyboardInput) {
+          this.vx += keyboard.dx * this.config.playerAcceleration * dt;
+          this.vy += keyboard.dy * this.config.playerAcceleration * dt;
+          this.vx = clamp(this.vx, -this.config.playerMaxSpeed, this.config.playerMaxSpeed);
+          this.vy = clamp(this.vy, -this.config.playerMaxSpeed, this.config.playerMaxSpeed);
+        } else {
+          this.vx *= 0.92;
+          this.vy *= 0.92;
+        }
+
+        this.x += this.vx * dt * 60 / 60;
+        this.y += this.vy * dt * 60 / 60;
+
+        const pad = this.radius + 6;
+        this.x = clamp(this.x, pad, this.config.logicalWidth - pad);
+        this.y = clamp(this.y, pad, this.config.logicalHeight - pad);
+
+        this.rotation = this.vx * 0.07;
+
+        this._updateThruster(dt);
+      }
+
+      _updateThruster(dt) {
+        const speed = Math.hypot(this.vx, this.vy);
+        const thrustLength = clamp(speed * 4, 6, 28);
+        const flicker = randRange(-1.2, 1.2);
+
+        this.thruster.clear();
+        this.thruster.beginFill(0xffe066, 0.9);
+        this.thruster.drawPolygon([
+          -this.radius * 0.28, this.radius * 0.8,
+          0, this.radius * 0.8 + thrustLength + flicker,
+          this.radius * 0.28, this.radius * 0.8
+        ]);
+        this.thruster.endFill();
+
+        this.thruster.beginFill(0xff9b40, 0.9);
+        this.thruster.drawPolygon([
+          -this.radius * 0.2, this.radius * 0.8,
+          0, this.radius * 0.8 + thrustLength * 0.6 + flicker,
+          this.radius * 0.2, this.radius * 0.8
+        ]);
+        this.thruster.endFill();
+      }
+
+      getCollisionCircle() {
+        return { x: this.x, y: this.y, r: this.radius * 0.7 };
+      }
+    }
+
+    class AsteroidManager {
+      constructor(config, container) {
+        this.config = config;
+        this.container = container;
+        this.asteroids = [];
+        this.elapsedSinceSpawn = 0;
+      }
+
+      reset() {
+        for (const a of this.asteroids) {
+          this.container.removeChild(a.sprite);
+        }
+        this.asteroids.length = 0;
+        this.elapsedSinceSpawn = 0;
+      }
+
+      _createAsteroid(scoreTime) {
+        const g = new PIXI.Graphics();
+
+        const radius = randRange(this.config.asteroidRadiusMin, this.config.asteroidRadiusMax);
+        const color = Math.random() > 0.5 ? 0xffb347 : 0xff6d6d;
+
+        g.beginFill(0x000000, 0.5);
+        g.drawCircle(3, 4, radius * 1.1);
+        g.endFill();
+
+        g.beginFill(color, 1);
+        g.drawCircle(0, 0, radius);
+        g.endFill();
+
+        g.beginFill(0x000000, 0.25);
+        for (let i = 0; i < 4; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const dist = randRange(radius * 0.15, radius * 0.55);
+          const r = randRange(radius * 0.12, radius * 0.2);
+          g.drawCircle(Math.cos(angle) * dist, Math.sin(angle) * dist, r);
+        }
+        g.endFill();
+
+        g.cacheAsBitmap = true;
+
+        const spawnX = randRange(radius, this.config.logicalWidth - radius);
+        const spawnY = -radius - 20;
+
+        const baseSpeed = this.config.asteroidSpeedBase;
+        const maxExtra = this.config.asteroidSpeedPerSecond * this.config.difficultyRampSeconds;
+        const t = clamp(scoreTime / this.config.difficultyRampSeconds, 0, 1);
+        const speed = baseSpeed + lerp(0, maxExtra, t) + randRange(-0.6, 0.6);
+
+        g.x = spawnX;
+        g.y = spawnY;
+        g.speedY = speed;
+
+        this.container.addChild(g);
+        this.asteroids.push({ sprite: g, r: radius });
+      }
+
+      update(deltaMS, scoreTime) {
+        const dt = Math.min(deltaMS, GameConfig.maxDeltaMS);
+        this.elapsedSinceSpawn += dt;
+
+        const t = clamp(scoreTime / this.config.difficultyRampSeconds, 0, 1);
+        const interval = lerp(
+          this.config.baseAsteroidSpawnInterval,
+          this.config.minAsteroidSpawnInterval,
+          t
+        );
+
+        while (this.elapsedSinceSpawn > interval) {
+          this.elapsedSinceSpawn -= interval;
+          this._createAsteroid(scoreTime);
+        }
+
+        const toRemove = [];
+        for (const a of this.asteroids) {
+          a.sprite.y += a.sprite.speedY * dt / 16.67;
+          if (a.sprite.y - a.r > this.config.logicalHeight + 40) {
+            toRemove.push(a);
+          }
+        }
+        for (const a of toRemove) {
+          this.container.removeChild(a.sprite);
+          const i = this.asteroids.indexOf(a);
+          if (i >= 0) this.asteroids.splice(i, 1);
+        }
+      }
+
+      checkCollision(playerCircle) {
+        for (const a of this.asteroids) {
+          const dx = a.sprite.x - playerCircle.x;
+          const dy = a.sprite.y - playerCircle.y;
+          const r = a.r + playerCircle.r;
+          if (dx * dx + dy * dy <= r * r) {
+            return true;
+          }
+        }
+        return false;
+      }
+    }
+
+    class Starfield {
+      constructor(app, config) {
+        this.app = app;
+        this.config = config;
+
+        const gfx = new PIXI.Graphics();
+        gfx.beginFill(0xffffff, 0.8);
+        for (let i = 0; i < 80; i++) {
+          const x = Math.random() * config.logicalWidth;
+          const y = Math.random() * config.logicalHeight;
+          const r = Math.random() < 0.8 ? 1 : 1.8;
+          gfx.drawCircle(x, y, r);
+        }
+        gfx.endFill();
+
+        const tex = app.renderer.generateTexture(gfx);
+        this.tilingSprite = new PIXI.TilingSprite(
+          tex,
+          config.logicalWidth,
+          config.logicalHeight
+        );
+        this.tilingSprite.alpha = 0.85;
+      }
+
+      get displayObject() {
+        return this.tilingSprite;
+      }
+
+      update(deltaMS) {
+        const dt = Math.min(deltaMS, GameConfig.maxDeltaMS);
+        this.tilingSprite.tilePosition.y += this.config.starfieldScrollSpeed * dt / 16.67;
+      }
+    }
+
+    class HUD {
+      constructor(config) {
+        this.container = new PIXI.Container();
+        this.config = config;
+
+        this.scoreLabel = new PIXI.Text("0.0", {
+          fill: 0xffffff,
+          fontFamily: "system-ui",
+          fontSize: 26,
+          letterSpacing: 0.5
+        });
+        this.scoreLabel.anchor.set(0, 0);
+        this.scoreLabel.position.set(16, 14);
+
+        const subLabel = new PIXI.Text("seconds survived", {
+          fill: 0x8b9bb0,
+          fontFamily: "system-ui",
+          fontSize: 12
+        });
+        subLabel.anchor.set(0, 0);
+        subLabel.position.set(16, 44);
+
+        this.container.addChild(this.scoreLabel, subLabel);
+
+        this.pauseLabel = new PIXI.Text("Press [P] to pause", {
+          fill: 0x6f8299,
+          fontFamily: "system-ui",
+          fontSize: 13
+        });
+        this.pauseLabel.anchor.set(1, 0);
+        this.pauseLabel.position.set(config.logicalWidth - 16, 16);
+        this.container.addChild(this.pauseLabel);
+      }
+
+      update(scoreSeconds, isPaused) {
+        this.scoreLabel.text = scoreSeconds.toFixed(1);
+        this.pauseLabel.text = isPaused ? "Paused – Press [P] to resume" : "Press [P] to pause";
+      }
+
+      get displayObject() {
+        return this.container;
+      }
+    }
+
+    class OverlayUI {
+      constructor(config) {
+        this.config = config;
+        this.container = new PIXI.Container();
+        this.container.interactive = true;
+        this.container.visible = false;
+
+        const w = config.logicalWidth;
+        const h = config.logicalHeight;
+
+        const dimmer = new PIXI.Graphics();
+        dimmer.beginFill(0x050814, 0.88);
+        dimmer.drawRoundedRect(20, h * 0.21, w - 40, h * 0.58, 18);
+        dimmer.endFill();
+
+        this.title = new PIXI.Text("STARLANE RUNNER", {
+          fill: 0xffffff,
+          fontFamily: "system-ui",
+          fontSize: 34,
+          letterSpacing: 4,
+          align: "center"
+        });
+        this.title.anchor.set(0.5, 0.5);
+        this.title.position.set(w / 2, h * 0.3);
+
+        this.subtitle = new PIXI.Text("A tiny infinite HTML5 arcade by YOU", {
+          fill: 0x8b9bb0,
+          fontFamily: "system-ui",
+          fontSize: 14,
+          align: "center"
+        });
+        this.subtitle.anchor.set(0.5, 0.5);
+        this.subtitle.position.set(w / 2, h * 0.37);
+
+        this.message = new PIXI.Text("", {
+          fill: 0xffffff,
+          fontFamily: "system-ui",
+          fontSize: 22,
+          align: "center"
+        });
+        this.message.anchor.set(0.5, 0.5);
+        this.message.position.set(w / 2, h * 0.46);
+
+        this.scoreBreakdown = new PIXI.Text("", {
+          fill: 0x9fb4ce,
+          fontFamily: "system-ui",
+          fontSize: 16,
+          align: "center"
+        });
+        this.scoreBreakdown.anchor.set(0.5, 0.5);
+        this.scoreBreakdown.position.set(w / 2, h * 0.55);
+
+        this.button = new PIXI.Container();
+        const btnGfx = new PIXI.Graphics();
+        btnGfx.beginFill(0x24d5ff, 1);
+        btnGfx.drawRoundedRect(0, 0, 220, 56, 22);
+        btnGfx.endFill();
+        btnGfx.beginFill(0x61e3ff, 0.18);
+        btnGfx.drawRoundedRect(0, 0, 220, 56, 22);
+        btnGfx.endFill();
+
+        const btnLabel = new PIXI.Text("Tap / Click to Start", {
+          fill: 0x001018,
+          fontFamily: "system-ui",
+          fontSize: 18
+        });
+        btnLabel.anchor.set(0.5, 0.5);
+        btnLabel.position.set(110, 28);
+        this.button.addChild(btnGfx, btnLabel);
+        this.button.pivot.set(110, 28);
+        this.button.position.set(w / 2, h * 0.68);
+        this.button.interactive = true;
+        this.button.buttonMode = true;
+
+        this.footer = new PIXI.Text("Move with mouse, touch, or arrows.\nSurvive as long as you can.",
+          {
+            fill: 0x6f8299,
+            fontFamily: "system-ui",
+            fontSize: 13,
+            align: "center"
+          });
+        this.footer.anchor.set(0.5, 0.5);
+        this.footer.position.set(w / 2, h * 0.79);
+
+        this.container.addChild(dimmer, this.title, this.subtitle, this.message, this.scoreBreakdown, this.button, this.footer);
+      }
+
+      onClick(handler) {
+        this.button.on("pointertap", handler);
+        this.container.on("pointertap", handler);
+      }
+
+      showMenu() {
+        this.container.visible = true;
+        this.title.text = "STARLANE RUNNER";
+        this.subtitle.text = "A tiny infinite HTML5 arcade by YOU";
+        this.message.text = "Thread the asteroid field.";
+        this.scoreBreakdown.text = "Stay alive to climb the difficulty curve.";
+        this._setButtonText("Tap / Click to Start");
+      }
+
+      showGameOver(scoreSeconds, bestScoreSeconds) {
+        this.container.visible = true;
+        this.title.text = "Ship Lost";
+        this.subtitle.text = "You were vaporized in deep space.";
+        this.message.text = `You lasted ${scoreSeconds.toFixed(1)} seconds.`;
+        this.scoreBreakdown.text = `Best run: ${bestScoreSeconds.toFixed(1)} seconds.`;
+        this._setButtonText("Play Again");
+      }
+
+      hide() {
+        this.container.visible = false;
+      }
+
+      _setButtonText(text) {
+        const label = this.button.children.find(
+          c => c instanceof PIXI.Text
+        );
+        if (label) label.text = text;
+      }
+
+      get displayObject() {
+        return this.container;
+      }
+    }
+
+    class ParticleSystem {
+      constructor(container) {
+        this.container = container;
+        this.particles = [];
+      }
+
+      spawnBurst(x, y, color) {
+        for (let i = 0; i < 40; i++) {
+          const g = new PIXI.Graphics();
+          const size = randRange(1.5, 3);
+          g.beginFill(color, 1);
+          g.drawCircle(0, 0, size);
+          g.endFill();
+
+          g.x = x;
+          g.y = y;
+
+          const angle = Math.random() * Math.PI * 2;
+          const speed = randRange(2, 7);
+          g.vx = Math.cos(angle) * speed;
+          g.vy = Math.sin(angle) * speed;
+          g.life = randRange(300, 650);
+          g.alpha = 1;
+
+          this.container.addChild(g);
+          this.particles.push(g);
+        }
+      }
+
+      update(deltaMS) {
+        const dt = Math.min(deltaMS, GameConfig.maxDeltaMS);
+        const toRemove = [];
+        for (const p of this.particles) {
+          p.life -= dt;
+          if (p.life <= 0) {
+            toRemove.push(p);
+            continue;
+          }
+          const lifeRatio = p.life / 650;
+          p.x += p.vx * dt / 16.67;
+          p.y += p.vy * dt / 16.67;
+          p.alpha = lifeRatio;
+          p.scale.set(lerp(0.2, 1, lifeRatio));
+        }
+        for (const p of toRemove) {
+          this.container.removeChild(p);
+          const i = this.particles.indexOf(p);
+          if (i >= 0) this.particles.splice(i, 1);
+        }
+      }
+    }
+
+    class Game {
+      constructor() {
+        this.state = new StateStore();
+        this.scoreSeconds = 0;
+        this.bestScoreSeconds = 0;
+        this.lastTime = performance.now();
+        this.isPaused = false;
+
+        this._initPixi();
+      }
+
+      _initPixi() {
+        const container = document.getElementById("game-container");
+        this.app = new PIXI.Application({
+          width: GameConfig.logicalWidth,
+          height: GameConfig.logicalHeight,
+          backgroundColor: GameConfig.backgroundColor,
+          antialias: true,
+          resolution: window.devicePixelRatio || 1,
+          autoDensity: true
+        });
+
+        container.appendChild(this.app.view);
+
+        this.input = new InputManager(this.app.view, GameConfig.logicalWidth, GameConfig.logicalHeight);
+        this.input.attachApp(this.app);
+
+        this.root = new PIXI.Container();
+        this.app.stage.addChild(this.root);
+
+        this.starfield = new Starfield(this.app, GameConfig);
+        this.root.addChild(this.starfield.displayObject);
+
+        this.world = new PIXI.Container();
+        this.root.addChild(this.world);
+
+        this.player = new Player(GameConfig);
+        this.player.position.set(GameConfig.logicalWidth / 2, GameConfig.logicalHeight * 0.72);
+        this.world.addChild(this.player);
+
+        this.asteroids = new AsteroidManager(GameConfig, this.world);
+
+        this.particles = new ParticleSystem(this.world);
+
+        this.hud = new HUD(GameConfig);
+        this.root.addChild(this.hud.displayObject);
+
+        this.overlay = new OverlayUI(GameConfig);
+        this.root.addChild(this.overlay.displayObject);
+
+        this.overlay.onClick(() => {
+          if (this.state.is(GameState.Menu) || this.state.is(GameState.GameOver)) {
+            this.startRun();
+          }
+        });
+
+        this._registerResizeHandling();
+        this._registerPauseHandling();
+
+        this.state.set(GameState.Menu);
+        this.overlay.showMenu();
+
+        this.app.ticker.add(this._update.bind(this));
+      }
+
+      _registerResizeHandling() {
+        const resize = () => {
+          const parent = this.app.view.parentNode;
+          if (!parent) return;
+
+          const w = parent.clientWidth;
+          const h = parent.clientHeight;
+
+          const scale = Math.min(
+            w / GameConfig.logicalWidth,
+            h / GameConfig.logicalHeight
+          );
+
+          const newWidth = GameConfig.logicalWidth * scale;
+          const newHeight = GameConfig.logicalHeight * scale;
+
+          this.app.view.style.width = `${newWidth}px`;
+          this.app.view.style.height = `${newHeight}px`;
+        };
+
+        window.addEventListener("resize", resize);
+        resize();
+      }
+
+      _registerPauseHandling() {
+        window.addEventListener("keydown", e => {
+          if (e.code === "KeyP") {
+            if (this.state.is(GameState.Running)) {
+              this.isPaused = !this.isPaused;
+            } else if (this.state.is(GameState.Paused)) {
+              this.isPaused = false;
+              this.state.set(GameState.Running);
+            }
+          }
+        });
+      }
+
+      startRun() {
+        this.state.set(GameState.Running);
+        this.isPaused = false;
+        this.scoreSeconds = 0;
+
+        this.player.position.set(
+          GameConfig.logicalWidth / 2,
+          GameConfig.logicalHeight * 0.72
+        );
+        this.player.vx = 0;
+        this.player.vy = 0;
+
+        this.asteroids.reset();
+        this.overlay.hide();
+      }
+
+      endRun() {
+        this.state.set(GameState.GameOver);
+        this.isPaused = false;
+        this.bestScoreSeconds = Math.max(this.bestScoreSeconds, this.scoreSeconds);
+
+        this.overlay.showGameOver(this.scoreSeconds, this.bestScoreSeconds);
+      }
+
+      _update() {
+        const now = performance.now();
+        const deltaMS = now - this.lastTime;
+        this.lastTime = now;
+
+        this.starfield.update(deltaMS);
+
+        if (this.state.is(GameState.Running)) {
+          if (this.isPaused) {
+            this.state.set(GameState.Paused);
+          } else {
+            this._updateGame(deltaMS);
+          }
+        } else if (this.state.is(GameState.Paused)) {
+        }
+
+        this.particles.update(deltaMS);
+
+        this.hud.update(this.scoreSeconds, this.state.is(GameState.Paused) || this.isPaused);
+      }
+
+      _updateGame(deltaMS) {
+        const dtSeconds = Math.min(deltaMS, GameConfig.maxDeltaMS) / 1000;
+        this.scoreSeconds += dtSeconds;
+
+        this.player.update(deltaMS, this.input);
+        this.asteroids.update(deltaMS, this.scoreSeconds);
+
+        const circle = this.player.getCollisionCircle();
+        const hit = this.asteroids.checkCollision(circle);
+        if (hit) {
+          this.particles.spawnBurst(this.player.x, this.player.y, 0xff6d6d);
+          this.endRun();
+        }
+      }
+    }
+
+    window.addEventListener("load", () => {
+      new Game();
+    });
+  </script>
+</body>
+</html>
