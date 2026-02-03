@@ -12,3 +12,5 @@ Starlane Runner is a small, polished **HTML5/PixiJS infinite dodger** built as a
 2. Click / tap the central button to start.
 3. Move the ship to dodge asteroids and survive as long as you can.
 
+Easy and visually pretty
+A project to show skills for SOFTGAMES
